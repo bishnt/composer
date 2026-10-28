@@ -120,3 +120,37 @@ def test_ema_algorithm(params, model_cls, minimal_state, empty_logger):
     # Check if the training model is swapped back in for training
     algorithm.apply(Event.EVAL_END, state, empty_logger)
     validate_model(state.model, training_updated_model)
+
+
+def _legacy_state_dict(model: torch.nn.Module, ema_weights_active: bool):
+    # Before 0.13.0 the state dict held a separate training_model and ema_model.
+    return {
+        'training_model': copy.deepcopy(model.state_dict()),
+        'ema_model': copy.deepcopy(model.state_dict()),
+        'ema_weights_active': ema_weights_active,
+    }
+
+
+def test_ensure_compatible_state_dict_requires_initialized_ema_model():
+    algorithm = EMA(half_life='10ba', update_interval='1ba')
+    state = _legacy_state_dict(torch.nn.Linear(2, 2), ema_weights_active=False)
+
+    with pytest.raises(ValueError, match='ema_model must be initialized'):
+        algorithm.ensure_compatible_state_dict(state)
+
+
+@pytest.mark.parametrize('ema_weights_active', [True, False])
+def test_ensure_compatible_state_dict_converts_legacy_state_dict(ema_weights_active):
+    model = torch.nn.Linear(2, 2)
+    algorithm = EMA(half_life='10ba', update_interval='1ba')
+    algorithm.ema_model = EMAParameters(model)
+    state = _legacy_state_dict(model, ema_weights_active)
+    # Only the weights that are not active are loaded as the ema weights.
+    source = state['training_model'] if ema_weights_active else state['ema_model']
+
+    converted = algorithm.ensure_compatible_state_dict(state)
+
+    assert 'training_model' not in converted
+    assert set(converted['ema_model']) == {'named_parameters_dict', 'named_buffers_dict'}
+    for name, value in converted['ema_model']['named_parameters_dict'].items():
+        torch.testing.assert_close(value, source[name])
